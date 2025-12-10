@@ -3,6 +3,7 @@ hls_downloader
 hls_downloader.exe
 hls_downloader-*
 hls_downloader_*
+bin/*
 
 # Go 模块和构建文件
 go.mod.sum
