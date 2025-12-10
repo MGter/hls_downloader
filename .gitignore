@@ -1,0 +1,50 @@
+# 编译的可执行文件
+hls_downloader
+hls_downloader.exe
+hls_downloader-*
+hls_downloader_*
+
+# Go 模块和构建文件
+go.mod.sum
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 测试二进制文件
+*.test
+*.out
+
+# 依赖目录
+vendor/
+
+# Go 工作区
+go.work
+go.work.sum
+
+# IDE 配置文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统生成的文件
+.DS_Store
+Thumbs.db
+
+# 项目特定的配置文件（如果有敏感信息）
+config.yaml
+config.json
+.env
+*.local
+
+# 构建目录
+dist/
+build/
+output/
+
+# 临时文件
+tmp/
+temp/
