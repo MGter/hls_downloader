@@ -142,6 +142,7 @@ func (p *M3U8Parser) parseRelativeURL(relativeURL string, baseURL *url.URL) (str
 }
 
 // ExtractSegmentID 生成唯一的片段标识符
+// 使用 URL 的完整路径（包括查询参数）作为唯一标识，避免重复下载问题
 func (p *M3U8Parser) ExtractSegmentID(urlStr string, mediaSeq, index int) (string, error) {
 	// 解析URL字符串
 	parsedURL, err := url.Parse(urlStr)
@@ -149,17 +150,33 @@ func (p *M3U8Parser) ExtractSegmentID(urlStr string, mediaSeq, index int) (strin
 		return "", err
 	}
 
-	// 从URL路径中提取文件名
+	// 从URL路径中提取文件名（不含扩展名）
 	baseName := path.Base(parsedURL.Path)
+	// 去除文件扩展名
+	baseNameNoExt := strings.TrimSuffix(baseName, path.Ext(baseName))
+
 	// 检查文件名是否有效
-	if baseName == "" || baseName == "." || baseName == "/" {
+	if baseNameNoExt == "" || baseNameNoExt == "." || baseNameNoExt == "/" {
 		return "", fmt.Errorf("invalid filename")
 	}
 
-	// 去除文件扩展名
-	baseNameNoExt := strings.TrimSuffix(baseName, path.Ext(baseName))
-	// 生成片段ID
-	return p.generateSegmentID(baseNameNoExt, mediaSeq, index), nil
+	// 构建唯一 segmentID：
+	// 1. 如果 URL 有查询参数，使用 "文件名_查询参数" 作为唯一标识
+	// 2. 如果没有查询参数，尝试从文件名提取数字
+	// 3. 如果文件名无数字，使用 "mediaSeq_index" 格式
+	if parsedURL.RawQuery != "" {
+		// URL 有查询参数时，文件名+查询参数组合作为唯一标识
+		// 这样可以区分同一文件名但不同版本的片段
+		return fmt.Sprintf("%s_%s", baseNameNoExt, parsedURL.RawQuery), nil
+	}
+
+	// 无查询参数时，尝试从文件名提取数字
+	if numStr := p.extractSegmentNumber(baseNameNoExt); numStr != "" {
+		return numStr, nil
+	}
+
+	// 文件名无数字，使用 mediaSeq_index 格式
+	return fmt.Sprintf("%d_%d", mediaSeq, index), nil
 }
 
 // extractSegmentNumber 从文件名中提取末尾的数字部分
