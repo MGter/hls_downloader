@@ -31,6 +31,15 @@ func (fm *FileManager) ConcurrentDownload(ctx context.Context, urls []string, te
 
 	// 遍历所有要下载的URL
 	for i, fileURL := range urls {
+		// 检查 context 是否已取消
+		select {
+		case <-ctx.Done():
+			wg.Wait()  // 等待已启动的 goroutine 完成
+			close(errChan)
+			return ctx.Err()  // 返回取消原因
+		default:
+		}
+
 		wg.Add(1)     // 等待组计数加1
 		sem <- struct{}{}  // 获取一个信号量，如果已满则等待
 
@@ -39,6 +48,11 @@ func (fm *FileManager) ConcurrentDownload(ctx context.Context, urls []string, te
 			defer wg.Done()          // goroutine结束时减少等待组计数
 			defer func() { <-sem }() // 释放信号量，允许其他goroutine执行
 
+			// 检查 context 是否已取消
+			if ctx.Err() != nil {
+				return  // 直接返回，不下载
+			}
+
 			// 生成要保存的文件名
 			filename, err := fm.generateFilename(currentURL, tempDir, index)
 			if err != nil {
@@ -46,8 +60,8 @@ func (fm *FileManager) ConcurrentDownload(ctx context.Context, urls []string, te
 				return
 			}
 
-			// 下载文件（带重试机制）
-			if err := fm.downloadFileWithRetry(currentURL, filename, maxRetries); err != nil {
+			// 下载文件（带重试机制，支持 context 取消）
+			if err := fm.downloadFileWithRetryContext(ctx, currentURL, filename, maxRetries); err != nil {
 				errChan <- fmt.Errorf("下载失败 [%s]: %w", currentURL, err)
 				return
 			}
@@ -103,11 +117,39 @@ func (fm *FileManager) downloadFileWithRetry(fileURL, filepath string, maxRetrie
 		if err := fm.downloadSingleFile(fileURL, filepath); err == nil {
 			return nil  // 下载成功
 		}
-		
+
 		// 如果不是最后一次重试，等待一段时间
 		if i < maxRetries-1 {
 			delay := time.Second * time.Duration(i+1)  // 重试延迟时间逐渐增加
 			time.Sleep(delay)
+		}
+	}
+	// 所有重试都失败
+	return fmt.Errorf("达到最大重试次数: %s", fileURL)
+}
+
+// downloadFileWithRetryContext 带重试机制的下载（支持 context 取消）
+func (fm *FileManager) downloadFileWithRetryContext(ctx context.Context, fileURL, filepath string, maxRetries int) error {
+	// 尝试下载，最多重试maxRetries次
+	for i := 0; i < maxRetries; i++ {
+		// 检查 context 是否已取消
+		if ctx.Err() != nil {
+			return ctx.Err()  // 返回取消错误
+		}
+
+		// 尝试下载单个文件
+		if err := fm.downloadSingleFile(fileURL, filepath); err == nil {
+			return nil  // 下载成功
+		}
+
+		// 如果不是最后一次重试，等待一段时间（支持 context 取消）
+		if i < maxRetries-1 {
+			delay := time.Second * time.Duration(i+1)  // 重试延迟时间逐渐增加
+			select {
+			case <-time.After(delay):  // 等待延迟时间
+			case <-ctx.Done():         // context 取消，立即返回
+				return ctx.Err()
+			}
 		}
 	}
 	// 所有重试都失败
