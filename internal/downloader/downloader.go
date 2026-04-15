@@ -25,12 +25,13 @@ type Config struct {
 
 // HLSDownloader HLS下载器结构体
 type HLSDownloader struct {
-	config     Config                  // 配置参数
-	storage    *storage.FileManager    // 文件管理器，负责保存文件
-	parser     *parser.M3U8Parser      // M3U8解析器，解析播放列表
-	downloaded map[string]bool        // 记录已下载的片段，避免重复下载
-	mu         sync.RWMutex           // 读写锁，保护 downloaded map 的并发访问
-	originalURL string                 // 原始输入URL（包含查询参数）
+	config       Config               // 配置参数
+	storage      *storage.FileManager // 文件管理器，负责保存文件
+	parser       *parser.M3U8Parser   // M3U8解析器，解析播放列表
+	downloaded   map[string]bool      // 记录已下载的片段，避免重复下载
+	mu           sync.RWMutex         // 读写锁，保护 downloaded map 的并发访问
+	originalURL  string               // 原始输入URL（包含查询参数）
+	mapDownloaded bool                // 初始化片段是否已下载
 }
 
 // New 创建下载器实例
@@ -74,6 +75,7 @@ func (d *HLSDownloader) Start(m3u8URL string) error {
 // loopDownloadHLS 主循环：不断检查并下载新片段
 // 对于直播流：循环检查直到收到停止信号
 // 对于点播文件：下载完成后自动停止
+// 对于事件流：持续检查新片段，直到出现ENDLIST
 func (d *HLSDownloader) loopDownloadHLS(m3u8URL, tempDir string) error {
 	// 创建保存目录，权限0755表示：所有者可读写执行，其他人可读执行
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
@@ -82,7 +84,7 @@ func (d *HLSDownloader) loopDownloadHLS(m3u8URL, tempDir string) error {
 
 	// 创建可取消的 context
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()  // 确保在函数退出时释放资源
+	defer cancel() // 确保在函数退出时释放资源
 
 	// 设置信号监听，捕获 SIGINT (Ctrl+C) 和 SIGTERM
 	sigChan := make(chan os.Signal, 1)
@@ -92,21 +94,22 @@ func (d *HLSDownloader) loopDownloadHLS(m3u8URL, tempDir string) error {
 	go func() {
 		sig := <-sigChan
 		log.Printf("收到信号 %v，正在优雅退出...", sig)
-		cancel()  // 取消 context，通知所有 goroutine 停止
+		cancel() // 取消 context，通知所有 goroutine 停止
 	}()
 
 	log.Printf("按 Ctrl+C 可优雅退出程序")
 
-	// 用于追踪是否是点播文件及其下载状态
+	// 用于追踪播放列表状态
 	var isVOD bool
+	var isEvent bool
 	var vodCompleted bool
 
-	// 主循环，直到 context 被取消或点播文件下载完成
+	// 主循环，直到 context 被取消或下载完成
 	for {
 		// 检查 context 是否已取消
 		if ctx.Err() != nil {
 			log.Printf("下载器已停止")
-			return nil  // 优雅退出
+			return nil // 优雅退出
 		}
 
 		// 如果是点播文件且已完成下载，停止循环
@@ -126,16 +129,30 @@ func (d *HLSDownloader) loopDownloadHLS(m3u8URL, tempDir string) error {
 			// 其他错误，等待后重试
 			log.Printf("处理 M3U8 文件时发生错误: %v，将在 %v 后重试", err, d.config.DownloadInterval)
 		} else if playlist != nil {
-			// 更新点播状态
+			// 更新播放列表状态
 			isVOD = playlist.IsVOD
-			// 如果是点播文件且本次没有新片段，说明下载完成
-			if isVOD && len(d.filterNewSegments(playlist.URLs, playlist.MediaSequence)) == 0 {
-				vodCompleted = true
+			isEvent = playlist.IsEvent
+
+			// 打印播放列表信息
+			if playlist.Version > 0 {
+				log.Printf("HLS协议版本: %d, 目标时长: %.0f秒", playlist.Version, playlist.TargetDuration)
+			}
+			if playlist.PlaylistType != "" {
+				log.Printf("播放列表类型: %s", playlist.PlaylistType)
+			}
+
+			// 判断下载完成条件
+			if isVOD {
+				// 点播文件：检查是否还有新片段
+				newCount := len(d.filterNewSegments(playlist.URLs, playlist.MediaSequence))
+				if newCount == 0 && len(playlist.URLs) > 0 {
+					vodCompleted = true
+				}
 			}
 		}
 
-		// 如果是点播文件，不需要等待间隔，直接继续检查（或退出）
-		if isVOD {
+		// 点播文件或事件流不需要等待间隔，直接继续
+		if isVOD || isEvent {
 			continue
 		}
 
@@ -189,20 +206,121 @@ func (d *HLSDownloader) processM3U8WithContext(ctx context.Context, m3u8URL, tem
 		return d.processM3U8WithContext(ctx, selectedMediaURL, tempDir)
 	}
 
-	// 步骤4：过滤出新的片段（还没下载过的）
-	newTSURLs := d.filterNewSegments(playlist.URLs, playlist.MediaSequence)
-	if len(newTSURLs) == 0 {
-		log.Printf("未发现新片段，等待下次检查")
-		return playlist, nil  // 返回playlist以便主循环判断是否是点播文件
+	// 步骤4：下载初始化片段（fMP4格式）
+	if playlist.MapInfo != nil && !d.mapDownloaded {
+		log.Printf("发现初始化片段 (fMP4): %s", playlist.MapInfo.URL)
+		if err := d.downloadMapSegment(ctx, playlist.MapInfo, tempDir); err != nil {
+			return playlist, fmt.Errorf("下载初始化片段失败: %w", err)
+		}
+		d.mapDownloaded = true
+		log.Printf("初始化片段下载完成")
 	}
 
-	// 步骤5：并发下载新片段
-	log.Printf("发现 %d 个新片段，开始下载", len(newTSURLs))
-	if err := d.concurrentDownloadWithContext(ctx, newTSURLs, tempDir); err != nil {
-		return playlist, fmt.Errorf("并发下载新 TS 文件失败: %w", err)
+	// 步骤5：过滤出新的片段（还没下载过的）
+	// 使用详细的Segment信息进行过滤
+	newSegments := d.filterNewSegmentsDetailed(playlist.Segments, playlist.MediaSequence)
+	if len(newSegments) == 0 {
+		log.Printf("未发现新片段，等待下次检查")
+		return playlist, nil // 返回playlist以便主循环判断是否是点播文件
+	}
+
+	// 步骤6：并发下载新片段（支持字节范围）
+	log.Printf("发现 %d 个新片段，开始下载", len(newSegments))
+	if err := d.concurrentDownloadSegments(ctx, newSegments, tempDir); err != nil {
+		return playlist, fmt.Errorf("并发下载片段失败: %w", err)
 	}
 
 	return playlist, nil
+}
+
+// downloadMapSegment 下载初始化片段（fMP4格式）
+func (d *HLSDownloader) downloadMapSegment(ctx context.Context, mapInfo *parser.MapInfo, tempDir string) error {
+	// 检查 context 是否已取消
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	// 生成文件名：init.mp4 或 init_xxx.mp4
+	filename := "init.mp4"
+	filepath := tempDir + "/" + filename
+
+	// 检查是否已存在
+	if _, err := os.Stat(filepath); err == nil {
+		return nil // 已存在，无需重新下载
+	}
+
+	// 调用存储器下载（支持字节范围）
+	return d.storage.DownloadSegment(ctx, parser.Segment{
+		URL:       mapInfo.URL,
+		ByteRange: mapInfo.ByteRange,
+	}, filepath, d.config.MaxRetryAttempts)
+}
+
+// filterNewSegmentsDetailed 使用详细的Segment信息过滤新片段
+func (d *HLSDownloader) filterNewSegmentsDetailed(segments []parser.Segment, mediaSeq int) []parser.Segment {
+	if len(segments) == 0 {
+		return nil
+	}
+
+	var newSegments []parser.Segment
+	var stats = struct {
+		invalidURL, invalidName, downloaded int
+	}{}
+
+	for index, segment := range segments {
+		// 提取片段ID
+		segmentID, err := d.parser.ExtractSegmentID(segment.URL, mediaSeq, index)
+		if err != nil {
+			log.Printf("无效URL已跳过 [索引%d]: %s, 错误: %v", index, segment.URL, err)
+			stats.invalidURL++
+			continue
+		}
+
+		if segmentID == "" {
+			log.Printf("无效文件名已跳过 [索引%d]: %s", index, segment.URL)
+			stats.invalidName++
+			continue
+		}
+
+		// 检查是否已下载
+		d.mu.RLock()
+		alreadyDownloaded := d.downloaded[segmentID]
+		d.mu.RUnlock()
+
+		if alreadyDownloaded {
+			stats.downloaded++
+			continue
+		}
+
+		// 标记为已下载
+		d.mu.Lock()
+		if d.downloaded[segmentID] {
+			d.mu.Unlock()
+			stats.downloaded++
+			continue
+		}
+		d.downloaded[segmentID] = true
+		d.mu.Unlock()
+
+		newSegments = append(newSegments, segment)
+	}
+
+	log.Printf("片段过滤完成: 总计%d个, 新增%d个, 无效URL%d个, 无效文件名%d个, 已下载%d个",
+		len(segments), len(newSegments), stats.invalidURL, stats.invalidName, stats.downloaded)
+
+	return newSegments
+}
+
+// concurrentDownloadSegments 并发下载多个片段（支持字节范围）
+func (d *HLSDownloader) concurrentDownloadSegments(ctx context.Context, segments []parser.Segment, tempDir string) error {
+	// 转换为URL列表（兼容旧逻辑）
+	urls := make([]string, len(segments))
+	for i, seg := range segments {
+		urls[i] = seg.URL
+	}
+
+	// 调用新的下载方法
+	return d.storage.ConcurrentDownloadSegments(ctx, segments, tempDir, d.config.MaxConcurrentDownloads, d.config.MaxRetryAttempts)
 }
 
 // filterNewSegments 过滤出新片段（还没下载过的）
