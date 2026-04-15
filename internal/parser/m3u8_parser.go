@@ -14,6 +14,7 @@ import (
 type Playlist struct {
 	URLs          []string  // 提取出的所有URL
 	IsMaster      bool      // 是否是主播放列表（master playlist）
+	IsVOD         bool      // 是否是点播文件（包含 #EXT-X-ENDLIST）
 	MediaSequence int       // 媒体序列号，用于片段排序
 }
 
@@ -39,6 +40,7 @@ func (p *M3U8Parser) Parse(content, baseURL string) (*Playlist, error) {
 	// 判断播放列表类型
 	isMasterPlaylist := strings.Contains(content, "#EXT-X-STREAM-INF")  // 包含主列表标签
 	isMediaPlaylist := strings.Contains(content, "#EXTINF")             // 包含媒体列表标签
+	isVOD := strings.Contains(content, "#EXT-X-ENDLIST")                // 点播文件有结束标签
 
 	// 处理特殊情况
 	if isMasterPlaylist && isMediaPlaylist {
@@ -59,7 +61,7 @@ func (p *M3U8Parser) Parse(content, baseURL string) (*Playlist, error) {
 		return nil, fmt.Errorf("解析基础 URL 失败: %w", err)
 	}
 
-	// 从内容中提取所有URL
+	// 从内容中提取所有URL，并确保继承基础URL的查询参数
 	urls, err := p.extractURLsFromContent(content, base)
 	if err != nil {
 		return nil, err
@@ -69,6 +71,7 @@ func (p *M3U8Parser) Parse(content, baseURL string) (*Playlist, error) {
 	return &Playlist{
 		URLs:          urls,           // 提取的URL列表
 		IsMaster:      isMasterPlaylist, // 播放列表类型
+		IsVOD:         isVOD,          // 是否是点播文件
 		MediaSequence: mediaSeq,       // 媒体序列号
 	}, nil
 }
@@ -122,7 +125,7 @@ func (p *M3U8Parser) extractURLsFromContent(content string, baseURL *url.URL) ([
 	return urls, nil
 }
 
-// parseRelativeURL 解析相对URL为绝对URL
+// parseRelativeURL 解析相对URL为绝对URL，并确保继承基础URL的查询参数
 func (p *M3U8Parser) parseRelativeURL(relativeURL string, baseURL *url.URL) (string, error) {
 	// 解析相对URL
 	u, err := url.Parse(relativeURL)
@@ -133,8 +136,9 @@ func (p *M3U8Parser) parseRelativeURL(relativeURL string, baseURL *url.URL) (str
 	// 将相对URL与基础URL合并，得到绝对URL
 	finalURL := baseURL.ResolveReference(u)
 
-	// 特殊处理：如果片段没有query参数但基础URL有，则继承基础URL的query参数
-	if finalURL.RawQuery == "" && baseURL.RawQuery != "" {
+	// 关键修复：确保子URL继承基础URL的查询参数
+	// 如果基础URL有查询参数，且子URL没有自己的查询参数，则继承
+	if baseURL.RawQuery != "" && finalURL.RawQuery == "" {
 		finalURL.RawQuery = baseURL.RawQuery
 	}
 
