@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -95,9 +96,9 @@ func (fm *FileManager) ConcurrentDownloadSegments(ctx context.Context, segments 
 			// 下载成功，打印信息
 			// 下载成功，打印信息
 				if seg.Duration > 0 {
-					fmt.Printf("下载完成: %s (时长: %.2f秒)\n", path.Base(filename), seg.Duration)
+					log.Printf("下载完成: %s (时长: %.2f秒)", path.Base(filename), seg.Duration)
 				} else {
-					fmt.Printf("下载完成: %s\n", path.Base(filename))
+					log.Printf("下载完成: %s", path.Base(filename))
 				}
 		}(i, segment, byteRange)
 	}

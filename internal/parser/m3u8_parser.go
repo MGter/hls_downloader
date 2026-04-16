@@ -3,6 +3,7 @@ package parser  // 解析器包，负责解析M3U8文件
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"net/url"
 	"path"
 	"regexp"
@@ -104,7 +105,7 @@ func (p *M3U8Parser) Parse(content, baseURL string) (*Playlist, error) {
 	// 处理特殊情况
 	if isMasterPlaylist && isMediaPlaylist {
 		// 如果同时包含两种标签，按媒体列表处理
-		fmt.Printf("警告: M3U8 文件同时包含 Master/Media 标签，按 Media 列表处理")
+		log.Printf("警告: M3U8 文件同时包含 Master/Media 标签，按 Media 列表处理")
 		isMasterPlaylist = false
 	} else if !isMasterPlaylist && !isMediaPlaylist {
 		// 如果没有识别到任何标签，返回错误
@@ -303,7 +304,7 @@ func (p *M3U8Parser) extractSegmentsFromContent(content string, baseURL *url.URL
 		// 这是URL行，创建片段
 		parsedURL, err := p.parseRelativeURL(line, baseURL)
 		if err != nil {
-			fmt.Printf("警告: 无法解析 URL '%s': %v\n", line, err)
+			log.Printf("警告: 无法解析 URL '%s': %v", line, err)
 			continue
 		}
 
