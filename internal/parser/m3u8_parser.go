@@ -275,8 +275,6 @@ func (p *M3U8Parser) extractSegmentsFromContent(content string, baseURL *url.URL
 			if len(match) >= 2 {
 				if dur, err := strconv.ParseFloat(match[1], 64); err == nil {
 					currentDuration = dur
-					// 打印切片时长日志
-					fmt.Printf("读取切片时长: %.2f 秒\n", dur)
 				}
 				if len(match) >= 3 {
 					currentTitle = strings.TrimSpace(match[2])
